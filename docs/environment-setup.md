@@ -129,7 +129,7 @@ setx VCPKG_ROOT "D:/path/to/vcpkg"
 > **注意**：doctest 无 triplet 子目录，但**平台之间并不共用同一份**——落点写的是
 > `${sourceDir}/../Libs/doctest`，而 `sourceDir` 在两个平台上不是同一个目录：
 > Windows 直接构建 `D:\Gitee\DbAdapters`（落点 `D:\Gitee\Libs\doctest`），
-> WSL 走 Visual Studio 的远程副本 `~/.vs/DBAdapters`（落点 `~/.vs/Libs/doctest`）。
+> WSL 走 Visual Studio 的远程副本 `~/.vs/DbAdapters`（落点 `~/.vs/Libs/doctest`）。
 > 两边**各放一份**，互相不可见。
 
 放置位置（相对本项目父目录，即各仓同级的 `Libs`）：

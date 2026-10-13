@@ -131,7 +131,7 @@ repository** (it belongs to the local dependency tree alongside the `Libs/Spark`
 > **Note**: doctest has no triplet subdirectory, but the two platforms do **not** share one copy.
 > The search path is `${sourceDir}/../Libs/doctest`, and `sourceDir` is not the same directory on
 > both: Windows builds `D:\Gitee\DbAdapters` directly (placement `D:\Gitee\Libs\doctest`), while
-> WSL builds Visual Studio's remote copy `~/.vs/DBAdapters` (placement `~/.vs/Libs/doctest`).
+> WSL builds Visual Studio's remote copy `~/.vs/DbAdapters` (placement `~/.vs/Libs/doctest`).
 > Place it on **each side**; neither sees the other.
 
 Placement (relative to this project's parent directory, i.e. the `Libs` directory
