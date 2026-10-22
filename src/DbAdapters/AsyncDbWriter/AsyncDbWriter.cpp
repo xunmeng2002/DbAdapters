@@ -31,8 +31,9 @@ DbOperateType ToDbOperateType(DbAdapters::RowChangeType rowChangeType)
 	case DbAdapters::RowChangeType::Erase:			return DbOperateType::Delete;
 	case DbAdapters::RowChangeType::EraseByIndex:	return DbOperateType::DeleteByIndex;
 	case DbAdapters::RowChangeType::Truncate:		return DbOperateType::Truncate;
-	default:										return DbOperateType::Insert;
 	}
+	WriteLog(LogLevel::Warning, "Unknown RowChangeType:%d", static_cast<int>(rowChangeType));
+	return DbOperateType::Insert;
 }
 }
 
