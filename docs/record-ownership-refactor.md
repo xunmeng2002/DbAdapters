@@ -5,6 +5,8 @@
 > Templates 改 `.tpl` 后 Mdb（11 表）/ QuantTrading（21 表）重跑 `pump.py`，生成物 diff 逐表核对；
 > `cmake --install` 已落 `../Libs/DbAdapters/x64-windows`，Mdb 与 QuantTrading 的 `x64-Debug` 双双重编通过（§5.4 全四步已走完）。
 > 起因：`DbOperateImpl::DeallocateRecord()` 对 `Insert | BatchInsert | Truncate` 早退，而 `BatchInsert` 交出的记录既不在内存表、也无其他一方释放。
+>
+> **后续变更（2026-10-21）**：行变更改为发布不可变共享事件 `RowChangeEvent`，记录归事件所有——`Insert` / `BatchInsert` 装副本，`Update` / `Erase` 接管离表记录；`OnRecordInsert` 等回调由 `OnRowChange` / `OnRowBatchChange` 取代，`AsyncDbWriter` 同时实现 `MdbReplicaSubscriber` 并按表维护同步状态。本文的归属判据仍然成立，但回调名与"与内存表共持时用借用"那一条已不适用，以 `include/DbAdapters/DbInterface/RecordHandle.h` 与 `README.md` 为准。同日按用户裁定删除 `BorrowRecord`：事件一律自带记录，生产路径上不再存在"只借不还"，留着它只会保留一条能把内存表活记录交给写线程的入口。
 
 ## 0. 已定决策（2026-10-05 用户裁定）
 

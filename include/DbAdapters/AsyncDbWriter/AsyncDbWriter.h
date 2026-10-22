@@ -5,8 +5,10 @@
 #include <DbAdapters/DbInterface/Db.h>
 #include <DbAdapters/DbInterface/FailureLogThrottle.h>
 #include <DbAdapters/DbInterface/RecordHandle.h>
+#include <DbAdapters/DbInterface/RowChangeEvent.h>
 #include <DbAdapters/DbInterface/SchemaRegistry.h>
 #include <Spark/Core/Core.h>
+#include <cstdint>
 #include <list>
 #include <mutex>
 #include <condition_variable>
@@ -16,7 +18,15 @@ namespace DbAdapters
 {
 class DbOperate;
 
-class ASYNCDBWRITER_EXPORTS AsyncDbWriter : public Spark::Core::ThreadBase, public MdbSubscriber
+// 每张表的同步状态：断连丢弃增量；快照期间接收（清表与批量必须进队）；就绪后正常接收
+enum class TableSyncState : std::uint8_t
+{
+	Disconnected = 0,
+	Resyncing = 1,
+	Ready = 2
+};
+
+class ASYNCDBWRITER_EXPORTS AsyncDbWriter : public Spark::Core::ThreadBase, public MdbReplicaSubscriber
 {
 public:
 	AsyncDbWriter(Db* db, SchemaRegistry* schemaRegistry);
@@ -25,15 +35,14 @@ public:
 	Db* GetDb();
 	bool Connect();
 	void DisConnect();
+	// 待写操作数：断连期间恒为 0，非 0 即"已入队但还没提交给后端"
+	int PendingOperateCount();
 
+	virtual void OnRowChange(const RowChangeEventPtr& event) override;
+	virtual void OnRowBatchChange(const std::vector<RowChangeEventPtr>& events) override;
 	virtual void OnTableOp(DbOperateType op) override;
-	virtual void OnRecordInsert(unsigned int tableID, RecordHandle record) override;
-	virtual void OnRecordBatchInsert(unsigned int tableID, std::vector<RecordHandle> records) override;
-	virtual void OnRecordErase(unsigned int tableID, RecordHandle record) override;
-	virtual void OnRecordEraseByIndex(unsigned int tableID, unsigned int indexId, RecordHandle record) override;
-	virtual void OnRecordUpdate(unsigned int tableID, RecordHandle record) override;
-	virtual void OnRecordTruncate(unsigned int tableID) override;
-
+	virtual void OnSnapshotBegin(unsigned int tableId) override;
+	virtual void OnSnapshotComplete(unsigned int tableId) override;
 
 protected:
 	virtual void Run() override;
@@ -45,10 +54,12 @@ protected:
 
 private:
 	void AddDbOperate(DbOperate* dbOperate);
-	DbOperate* CreateDbOperate(DbOperateType operate, unsigned int tableId, RecordHandle record = RecordHandle(), unsigned int indexId = 0);
-	void EnqueueDbOperate(DbOperateType operate, unsigned int tableId, RecordHandle record = RecordHandle(), unsigned int indexId = 0);
-	int PendingOperateCount();
+	void AddDbOperateIfReady(unsigned int tableId, DbOperate* dbOperate);
+	DbOperate* CreateDbOperate(DbOperateType operate, unsigned int tableId);
+	DbOperate* CreateRowChangeOperate(const RowChangeEventPtr& event);
 	void DropPendingOperates(const char* triggerReason);
+	bool IsTableSyncableLocked(unsigned int tableId) const;
+	void SetTableSyncStateLocked(unsigned int tableId, TableSyncState state);
 
 	void ExecuteDbOperate(DbOperate* dbOperate);
 	void CreateTables(DbOperate* dbOperate);
@@ -70,5 +81,8 @@ private:
 	std::mutex mutex_;
 	std::condition_variable conditionVariable_;
 	FailureLogThrottle connectFailureLogThrottle_{ connectFailureReportInterval_ };
+	// 每张表的同步状态，下标即 TableId；按需扩容，未出现的 ID 即 Disconnected。受 mutex_ 保护。
+	// 与 dbOperates_ 共用一把锁：查状态 + 入队、清状态 + 换队列各在同一次加锁内，断连瞬间不会漏出幽灵操作
+	std::vector<std::uint8_t> syncStates_;
 };
 }

@@ -4,6 +4,7 @@
 #include <DbAdapters/AsyncDbWriter/AsyncDbWriter.h>
 #include <DbAdapters/BackendLoader/DbBackendLoader.h>
 #include <DbAdapters/DbInterface/RecordHandle.h>
+#include <DbAdapters/DbInterface/RowChangeEvent.h>
 #include <DbAdapters/DbInterface/SchemaRegistry.h>
 #include <DbAdapters/DbInterface/TypedTable.h>
 #include <DbAdapters/DuckdbWrapper/DuckdbWrapper.h>
@@ -19,6 +20,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -1046,7 +1048,10 @@ static bool TestAsyncWriterRecordOwnership()
     writer->GetDb()->CreateTables(&probeSchema, 1);
     writer->GetDb()->TruncateTables(&probeSchema, 1);
     writer->Start();
-    writer->OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 1)));
+    // 没有内存库时表状态不会自行建立：按快照协议宣布该表已同步，否则增量按"断连"丢弃
+    writer->OnSnapshotComplete(0);
+    writer->OnRowChange(std::make_shared<const RowChangeEvent>(
+        0, RowChangeType::Insert, 0, 1, true, AdoptRecord(AllocateProbeRecord(releaseCount, 1))));
 
     TypedTable<OwnershipProbeRecord> probeTable(writer->GetDb());
     std::vector<OwnershipProbeRecord*> probeRows;

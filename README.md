@@ -28,7 +28,8 @@ Created by [Fireseeker](https://fireseeker.cn/)
 | `IndexDefinition` | 二级索引定义（索引 ID + 字段集合），供按索引删除使用 |
 | `SchemaRegistry` | 表 ID → `TableSchema` 的注册表，`AsyncDbWriter` 据此反查 schema |
 | `TypedTable<T>` | 类型化表模板：基于 `T::GetSchema()` 提供类型安全的 `Insert / Update / Delete / SelectAll / SelectWithSql / BatchInsert` |
-| `MdbSubscriber` | 内存数据库变更订阅接口（插入 / 批量插入 / 删除 / 按索引删除 / 更新 / 清表） |
+| `MdbSubscriber` | 内存库行变更订阅接口：收下与全部订阅者共享的不可变 `RowChangeEvent`（插入 / 批量插入 / 删除 / 按索引删除 / 更新 / 清表） |
+| `MdbReplicaSubscriber` | 副本订阅者：在行变更之外追加快照控制（`OnTableOp` / `OnSnapshotBegin` / `OnSnapshotComplete`），全库至多一个 |
 | `DbSubscriber` | 数据库连接状态订阅接口（连接 / 断开） |
 
 ### 2. 数据库适配器（Wrapper）
@@ -92,7 +93,8 @@ delete backend;
 把"内存库变更"异步落盘的关键组件：
 
 - 继承 `Spark::Core::ThreadBase`，后台线程循环消费操作队列
-- 实现 `MdbSubscriber`，将内存库的 `OnRecordInsert / OnRecordBatchInsert / OnRecordErase / ...` 事件封装为 `DbOperate` 投递入队
+- 实现 `MdbReplicaSubscriber`，把行变更事件原样挂进 `DbOperate` 入队（记录随事件走，`Update` / `Erase` 零拷贝）
+- 同步状态按表维护：断连期间到达的增量就地丢弃，重连后由订阅方全量快照重建，队列里不会残留断连期的"幽灵操作"
 - 建表 / 删表 / 清表以批操作下发，插入支持事务批量（BatchInsert）
 - 断线自动重连，异常操作记录日志并短暂休眠后重试；重连成功后由订阅方全量 resync 补齐断开期间的
   内存表状态（SQLite / DuckDB 的写失败就地记日志、不抛异常，故只有 MySQL / MariaDB 会走到重连）
@@ -315,6 +317,7 @@ struct Account
     int  AccountType;
 
     static Account* Allocate() { return new Account(); }
+    void Deallocate() { delete this; }
 
     static const FieldDescriptor Fields[3];
     static const int PrimaryKey[1];
@@ -472,6 +475,7 @@ int main()
 ```cpp
 #include <DbAdapters/AsyncDbWriter/AsyncDbWriter.h>
 #include <DbAdapters/DbInterface/RecordHandle.h>
+#include <DbAdapters/DbInterface/RowChangeEvent.h>
 #include <DbAdapters/DbInterface/SchemaRegistry.h>
 #include <DbAdapters/SqliteWrapper/SqliteWrapper.h>
 #include <Spark/Core/Core.h>
@@ -519,11 +523,13 @@ int main()
     }
     writer.Start();                               // 启动后台落库线程
 
-    // 模拟内存库变更：业务代码在数据变化时回调 MdbSubscriber 接口
-    Account record;
-    std::memset(&record, 0, sizeof(record));
-    std::strcpy(record.AccountId, "A002");
-    writer.OnRecordInsert(Account::TableId, BorrowRecord(&record));  // 借用：record 是栈上活对象，归还仍归本函数
+    // 模拟内存库变更：生产方构造不可变事件后广播给订阅者
+    Account* record = Account::Allocate();
+    std::memset(record, 0, sizeof(*record));
+    std::strcpy(record->AccountId, "A002");
+    writer.OnRowChange(std::make_shared<const RowChangeEvent>(
+        Account::TableId, RowChangeType::Insert, 0, 1, true,
+        AdoptRecord(record)));  // 交接：此后记录归事件，最后一个引用释放时归还
 
     writer.Stop();
     writer.Join();
@@ -531,7 +537,9 @@ int main()
 }
 ```
 
-> **记录所有权约定**：归还方式随记录句柄（`RecordHandle`）一起移交，不再按操作类型推断。生产方在移交点声明：`AdoptRecord(record)` 表示此后由写侧归还；`BorrowRecord(record)` 表示只借用指针、归还仍归自己（内存表同时持有同一条记录时用后者，否则写侧释放会让内存表里的活记录变成悬空指针）。`Insert` 与 `BatchInsert` 同属后者：表直接持有调用方交来的记录，写侧只借不还，故批与单次的归属语义完全一致，批插入也不必再为每条记录多造一份副本。**代价是借用期间调用方不得改写或释放该记录**——`Update` 会覆写它的字节、`Erase` 与 `TruncateTable` 会把它归还给对象池，而写线程此刻可能正在读它；凡是这批记录写出去之前就要改表，先 `Stop()` / `Join()` 写线程。**`BatchInsert` 不查重，这一条是调用方义务**：批量插入要求这批记录内部无重复键、且其主键与唯一键均不与表中已有记录冲突。该前提成立时逐条零额外开销；Release 下**不成立时不会有任何日志或失败**——重复的那条既不在索引里（`TruncateTable` 不会归还它，池槽位泄漏），又照样被写进数据库（内存表与库静默分叉）；**Debug 下则不静默**——`PrimaryKey` 与各唯一键的 `Insert` 返回值被就地 `assert`，违反契约会立刻中断进程（断言只覆盖这两类索引；二级索引是 `std::multiset`，重复键本就合法）。单条 `Insert` 则有预检：失败返回 `false` 并释放该记录。
+> 接真实内存库时不必手工造事件：`Mdb::SubscribeReplica(&writer)` 后，各表的 `Insert / Update / Erase / TruncateTable` 自行广播，写入结束（含断线重连）由 `Mdb::OnDbConnected` 触发的全量快照补齐。
+
+> **记录所有权约定**：记录随事件走。行变更事件（`RowChangeEvent`）发布后不可变、由全体订阅者共享：`Insert` / `BatchInsert` 装的是记录副本（内存表留着原记录），`Update` / `Erase` 接管调用方新建的、或刚从索引里摘出的记录，最后一个引用释放时 `RecordHandle` 调 `record->Deallocate()`——写线程因此永远读不到内存表里的活记录。外部生产者手工造事件时用 `AdoptRecord(record)` 交出记录，交出后不得再读写或释放它。**`BatchInsert` 不查重，这一条是调用方义务**：批量插入要求这批记录内部无重复键、且其主键与唯一键均不与表中已有记录冲突。该前提成立时逐条零额外开销；Release 下**不成立时不会有任何日志或失败**——重复的那条既不在索引里（`TruncateTable` 不会归还它，池槽位泄漏），又照样被写进数据库（内存表与库静默分叉）；**Debug 下则不静默**——`PrimaryKey` 与各唯一键的 `Insert` 返回值被就地 `assert`，违反契约会立刻中断进程（断言只覆盖这两类索引；二级索引是 `std::multiset`，重复键本就合法）。单条 `Insert` 则有预检：失败返回 `false` 并释放该记录。
 
 ## 七、集成测试
 

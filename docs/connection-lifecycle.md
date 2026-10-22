@@ -95,13 +95,12 @@ open.`）后直接返回，不再往下解引用。它拦的是
 `AsyncDbWriter::Run()` 每轮先 `CheckConnect()`，只在 `connected_ == false` 时才调
 `Connect()`。`Connect()` 成功后置 `connected_ = true` 并通知 `dbSubscriber_->OnDbConnected()`。
 
-Mdb 侧的 `OnDbConnected()` 落到 `InitDb()`：`CreateTables()` + 每表一条 `OnRecordTruncate`
-+ 每表一条全量 `OnRecordBatchInsert`。断开期间内存表的内容原样重放，效果幂等——这就是
-「丢弃待办是安全的」的依据。
+Mdb 侧的 `OnDbConnected()` 落到 `InitDb()`：`CreateTables()`，随后每张表在一次读租约内
+发 `OnSnapshotBegin` → 全量 `OnRowBatchChange` → `OnSnapshotComplete`（清表 + 批插 + 置就绪）。
+断开期间内存表的内容原样重放，效果幂等——这就是「丢弃待办是安全的」的依据。
 
-反向亦然：`OnDbDisConnected()` 把所有表的 `DbInited` 置 `false`，生产方受
-`mdbSubscriber_ != nullptr && DbInited` 双守卫（约 121 处调用点），随即停止广播，因此
-断连期间待办队列不会无界增长。
+反向亦然：`DisConnect()` 在同一个临界区内清空每张表的同步状态并换出待办队列，此后到达的
+增量在入队口就地丢弃（查状态与入队共用一把锁），因此断连期间待办队列不会无界增长。
 
 异常路径：`HandleDbOperate` 捕获异常后 `DisConnect()`（连带 `DropPendingOperates`）并休眠
 5 秒，下一轮 `CheckConnect()` 重连并全量 resync。
@@ -132,7 +131,7 @@ Mdb 侧的 `OnDbConnected()` 落到 `InitDb()`：`CreateTables()` + 每表一条
 以下五条是本设计的既定取舍，已知且不修，改动前请先评估是否真的值得动：
 
 1. **析构期间的并发入队**：若另一线程在 `DropPendingOperates()` 与 `delete db_` 之间调用
-   `OnRecordInsert`，这些操作会随 `dbOperates_` 一起漏掉。前提是调用方违反「先
+   `OnRowChange`，这些操作会随 `dbOperates_` 一起漏掉。前提是调用方违反「先
    `Stop()` / `Join()` 再改表」的纪律。
 2. **resync 不重试**：`OnDbConnected()` 抛异常后 resync 不会补做，要等下一次断连。
 3. **MySQL 下的永久失败语句**：会陷入「5 秒重连 + 全量 resync」的循环。resync 会把状态

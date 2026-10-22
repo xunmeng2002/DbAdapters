@@ -58,11 +58,4 @@ RecordHandle AdoptRecord(Record* record) noexcept
 {
     return RecordHandle(record, [](void* rawRecord) { static_cast<Record*>(rawRecord)->Deallocate(); });
 }
-
-//借用：归还仍归生产方。内存表同时持有同一条记录时必须用它——错用 AdoptRecord 释放的正是内存表里的活记录
-template <typename Record>
-RecordHandle BorrowRecord(Record* record) noexcept
-{
-    return RecordHandle(record, nullptr);
-}
 }

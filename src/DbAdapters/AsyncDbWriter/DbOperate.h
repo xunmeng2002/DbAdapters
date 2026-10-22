@@ -1,5 +1,5 @@
 #pragma once
-#include <DbAdapters/DbInterface/RecordHandle.h>
+#include <DbAdapters/DbInterface/RowChangeEvent.h>
 #include <Spark/Types.h>
 
 namespace DbAdapters
@@ -11,9 +11,10 @@ public:
 
 	virtual void Deallocate() = 0;
 
-	DbOperateType Operate;
-	unsigned int TableId;
-	unsigned int IndexId;
-	RecordHandle Record;
+	DbOperateType Operate = DbOperateType::Insert;
+	unsigned int TableId = 0;
+	unsigned int IndexId = 0;
+	// 行变更操作携带的事件；记录与序号都归事件所有，操作本身不持有记录
+	RowChangeEventPtr Event;
 };
 }

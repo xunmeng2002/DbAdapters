@@ -21,6 +21,19 @@ void ReleaseDbOperate(DbAdapters::DbOperate* dbOperate) noexcept
 }
 
 using DbOperateHandle = unique_ptr<DbAdapters::DbOperate, decltype(&ReleaseDbOperate)>;
+
+DbOperateType ToDbOperateType(DbAdapters::RowChangeType rowChangeType)
+{
+	switch (rowChangeType)
+	{
+	case DbAdapters::RowChangeType::Insert:			return DbOperateType::Insert;
+	case DbAdapters::RowChangeType::Update:			return DbOperateType::Update;
+	case DbAdapters::RowChangeType::Erase:			return DbOperateType::Delete;
+	case DbAdapters::RowChangeType::EraseByIndex:	return DbOperateType::DeleteByIndex;
+	case DbAdapters::RowChangeType::Truncate:		return DbOperateType::Truncate;
+	default:										return DbOperateType::Insert;
+	}
+}
 }
 
 namespace DbAdapters
@@ -102,7 +115,9 @@ void AsyncDbWriter::DropPendingOperates(const char* triggerReason)
 {
 	list<DbOperate*> droppedOperates;
 	{
+		// 清同步状态与换出队列必须同处一个临界区：否则两次加锁之间到达的增量会活到重连之后
 		lock_guard<mutex> guard(mutex_);
+		syncStates_.clear();
 		droppedOperates.swap(dbOperates_);
 	}
 	const size_t droppedCount = droppedOperates.size();
@@ -117,43 +132,52 @@ void AsyncDbWriter::DropPendingOperates(const char* triggerReason)
 	}
 }
 
-// ---- Generic MdbSubscriber overrides ----
+// ---- MdbReplicaSubscriber overrides ----
+
+void AsyncDbWriter::OnRowChange(const RowChangeEventPtr& event)
+{
+	if (!event->PersistDatabase)
+	{
+		return;
+	}
+	AddDbOperateIfReady(event->TableId, CreateRowChangeOperate(event));
+}
+
+void AsyncDbWriter::OnRowBatchChange(const std::vector<RowChangeEventPtr>& events)
+{
+	if (events.empty())
+	{
+		return;
+	}
+	const unsigned int tableId = events.front()->TableId;
+	DbOperate* dbOperate = DbOperateImpl::Allocate();
+	dbOperate->Operate = DbOperateType::BatchInsert;
+	dbOperate->TableId = tableId;
+	static_cast<DbOperateImpl*>(dbOperate)->SetBatchEvents(events);
+	AddDbOperateIfReady(tableId, dbOperate);
+}
 
 void AsyncDbWriter::OnTableOp(DbOperateType op)
 {
-	EnqueueDbOperate(op, 0);
+	AddDbOperate(CreateDbOperate(op, 0));
 }
 
-void AsyncDbWriter::OnRecordInsert(unsigned int tableID, RecordHandle record)
+void AsyncDbWriter::OnSnapshotBegin(unsigned int tableId)
 {
-	EnqueueDbOperate(DbOperateType::Insert, tableID, move(record));
+	DbOperate* dbOperate = CreateDbOperate(DbOperateType::Truncate, tableId);
+	{
+		// 切到 Resyncing 与清表入队同处一个临界区：批量随后到达时必须已被接受
+		lock_guard<mutex> guard(mutex_);
+		SetTableSyncStateLocked(tableId, TableSyncState::Resyncing);
+		dbOperates_.push_back(dbOperate);
+	}
+	conditionVariable_.notify_one();
 }
 
-void AsyncDbWriter::OnRecordBatchInsert(unsigned int tableID, std::vector<RecordHandle> records)
+void AsyncDbWriter::OnSnapshotComplete(unsigned int tableId)
 {
-	DbOperate* dbOperate = CreateDbOperate(DbOperateType::BatchInsert, tableID);
-	static_cast<DbOperateImpl*>(dbOperate)->SetBatchRecords(move(records));
-	AddDbOperate(dbOperate);
-}
-
-void AsyncDbWriter::OnRecordErase(unsigned int tableID, RecordHandle record)
-{
-	EnqueueDbOperate(DbOperateType::Delete, tableID, move(record));
-}
-
-void AsyncDbWriter::OnRecordEraseByIndex(unsigned int tableID, unsigned int indexId, RecordHandle record)
-{
-	EnqueueDbOperate(DbOperateType::DeleteByIndex, tableID, move(record), indexId);
-}
-
-void AsyncDbWriter::OnRecordUpdate(unsigned int tableID, RecordHandle record)
-{
-	EnqueueDbOperate(DbOperateType::Update, tableID, move(record));
-}
-
-void AsyncDbWriter::OnRecordTruncate(unsigned int tableID)
-{
-	EnqueueDbOperate(DbOperateType::Truncate, tableID);
+	lock_guard<mutex> guard(mutex_);
+	SetTableSyncStateLocked(tableId, TableSyncState::Ready);
 }
 
 
@@ -279,19 +303,57 @@ void AsyncDbWriter::AddDbOperate(DbOperate* dbOperate)
 	conditionVariable_.notify_one();
 }
 
-DbOperate* AsyncDbWriter::CreateDbOperate(DbOperateType operate, unsigned int tableId, RecordHandle record, unsigned int indexId)
+void AsyncDbWriter::AddDbOperateIfReady(unsigned int tableId, DbOperate* dbOperate)
+{
+	{
+		// 查位与入队必须在同一次加锁内：与 DropPendingOperates 的"置假 + 换队列"互斥
+		lock_guard<mutex> guard(mutex_);
+		if (!IsTableSyncableLocked(tableId))
+		{
+			// 该表已断连：操作就地释放，记录随事件回池
+			ReleaseDbOperate(dbOperate);
+			return;
+		}
+		dbOperates_.push_back(dbOperate);
+	}
+	conditionVariable_.notify_one();
+}
+
+DbOperate* AsyncDbWriter::CreateDbOperate(DbOperateType operate, unsigned int tableId)
 {
 	DbOperate* dbOperate = DbOperateImpl::Allocate();
 	dbOperate->Operate = operate;
 	dbOperate->TableId = tableId;
-	dbOperate->IndexId = indexId;
-	dbOperate->Record = move(record);
 	return dbOperate;
 }
 
-void AsyncDbWriter::EnqueueDbOperate(DbOperateType operate, unsigned int tableId, RecordHandle record, unsigned int indexId)
+DbOperate* AsyncDbWriter::CreateRowChangeOperate(const RowChangeEventPtr& event)
 {
-	AddDbOperate(CreateDbOperate(operate, tableId, move(record), indexId));
+	DbOperate* dbOperate = DbOperateImpl::Allocate();
+	dbOperate->Operate = ToDbOperateType(event->Type);
+	dbOperate->TableId = event->TableId;
+	dbOperate->IndexId = event->IndexId;
+	dbOperate->Event = event;
+	return dbOperate;
+}
+
+bool AsyncDbWriter::IsTableSyncableLocked(unsigned int tableId) const
+{
+	return tableId < syncStates_.size() &&
+		syncStates_[tableId] != static_cast<std::uint8_t>(TableSyncState::Disconnected);
+}
+
+void AsyncDbWriter::SetTableSyncStateLocked(unsigned int tableId, TableSyncState state)
+{
+	if (tableId >= syncStates_.size())
+	{
+		if (state == TableSyncState::Disconnected)
+		{
+			return;
+		}
+		syncStates_.resize(tableId + 1, static_cast<std::uint8_t>(TableSyncState::Disconnected));
+	}
+	syncStates_[tableId] = static_cast<std::uint8_t>(state);
 }
 
 void AsyncDbWriter::CreateTables(DbOperate* dbOperate)
@@ -309,9 +371,9 @@ void AsyncDbWriter::TruncateTables(DbOperate* dbOperate)
 void AsyncDbWriter::InsertRecord(DbOperate* dbOperate)
 {
 	const TableSchema* schema = schemaRegistry_->GetSchema(dbOperate->TableId);
-	if (schema)
+	if (schema && dbOperate->Event)
 	{
-		db_->Insert(schema, dbOperate->Record.Get());
+		db_->Insert(schema, dbOperate->Event->Record.Get());
 	}
 }
 void AsyncDbWriter::BatchInsertRecords(DbOperate* dbOperate)
@@ -319,36 +381,36 @@ void AsyncDbWriter::BatchInsertRecords(DbOperate* dbOperate)
 	const TableSchema* schema = schemaRegistry_->GetSchema(dbOperate->TableId);
 	if (!schema) return;
 
-	const std::vector<RecordHandle>& batchRecords = static_cast<DbOperateImpl*>(dbOperate)->GetBatchRecords();
-	if (batchRecords.empty()) return;
+	const std::vector<RowChangeEventPtr>& batchEvents = static_cast<DbOperateImpl*>(dbOperate)->GetBatchEvents();
+	if (batchEvents.empty()) return;
 
 	std::vector<const void*> recordPointers;
-	recordPointers.reserve(batchRecords.size());
-	for (const RecordHandle& record : batchRecords)
+	recordPointers.reserve(batchEvents.size());
+	for (const RowChangeEventPtr& event : batchEvents)
 	{
-		recordPointers.push_back(record.Get());
+		recordPointers.push_back(event->Record.Get());
 	}
 	db_->BatchInsert(schema, recordPointers.data(), static_cast<int>(recordPointers.size()));
 }
 void AsyncDbWriter::DeleteRecord(DbOperate* dbOperate)
 {
 	const TableSchema* schema = schemaRegistry_->GetSchema(dbOperate->TableId);
-	if (schema)
+	if (schema && dbOperate->Event)
 	{
-		db_->Delete(schema, dbOperate->Record.Get(), schema->primaryKeyIndices, schema->primaryKeyCount);
+		db_->Delete(schema, dbOperate->Event->Record.Get(), schema->primaryKeyIndices, schema->primaryKeyCount);
 	}
 }
 
 void AsyncDbWriter::DeleteRecordByIndex(DbOperate* dbOperate)
 {
 	const TableSchema* schema = schemaRegistry_->GetSchema(dbOperate->TableId);
-	if (!schema) return;
+	if (!schema || !dbOperate->Event) return;
 
 	for (int i = 0; i < schema->secondaryIndexCount; ++i)
 	{
 		if (schema->secondaryIndices[i].indexId == dbOperate->IndexId)
 		{
-			db_->Delete(schema, dbOperate->Record.Get(),
+			db_->Delete(schema, dbOperate->Event->Record.Get(),
 			             schema->secondaryIndices[i].fieldIndices,
 			             schema->secondaryIndices[i].fieldCount);
 			return;
@@ -359,9 +421,9 @@ void AsyncDbWriter::DeleteRecordByIndex(DbOperate* dbOperate)
 void AsyncDbWriter::UpdateRecord(DbOperate* dbOperate)
 {
 	const TableSchema* schema = schemaRegistry_->GetSchema(dbOperate->TableId);
-	if (schema)
+	if (schema && dbOperate->Event)
 	{
-		db_->Update(schema, dbOperate->Record.Get());
+		db_->Update(schema, dbOperate->Event->Record.Get());
 	}
 }
 void AsyncDbWriter::TruncateTable(DbOperate* dbOperate)

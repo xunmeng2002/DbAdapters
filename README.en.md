@@ -318,6 +318,7 @@ struct Account
     int  AccountType;
 
     static Account* Allocate() { return new Account(); }
+    void Deallocate() { delete this; }
 
     static const FieldDescriptor Fields[3];
     static const int PrimaryKey[1];
@@ -522,11 +523,13 @@ int main()
     }
     writer.Start();                               // Start the background persistence thread
 
-    // Simulate in-memory database changes: business code calls the MdbSubscriber interface
-    Account record;
-    std::memset(&record, 0, sizeof(record));
-    std::strcpy(record.AccountId, "A002");
-    writer.OnRecordInsert(Account::TableId, BorrowRecord(&record));  // Borrowed: `record` is a live stack object, still released here
+    // Simulate in-memory database changes: the producer builds an immutable event and broadcasts it
+    Account* record = Account::Allocate();
+    std::memset(record, 0, sizeof(*record));
+    std::strcpy(record->AccountId, "A002");
+    writer.OnRowChange(std::make_shared<const RowChangeEvent>(
+        Account::TableId, RowChangeType::Insert, 0, 1, true,
+        AdoptRecord(record)));  // Handover: the event owns the record and releases it with its last reference
 
     writer.Stop();
     writer.Join();
@@ -534,7 +537,7 @@ int main()
 }
 ```
 
-> **Record-ownership contract**: how a record is released travels with its record handle (`RecordHandle`) instead of being inferred from the operation type. The producer declares it at the handoff point: `AdoptRecord(record)` means the writer releases it from now on; `BorrowRecord(record)` means only the pointer is borrowed and the producer still releases it. `Insert` and `BatchInsert` both use the latter: the table holds the records handed in by the caller and the writer only borrows them, so batches and single inserts share exactly the same ownership semantics — and a batch no longer needs a private copy of every record. The price is that a borrowed record must not be modified or released while the writer may still be reading it: `Update` rewrites its bytes, and `Erase` / `TruncateTable` returns it to the object pool. Stop and join the writer before changing the table ahead of a pending write. **`BatchInsert` does not check for key conflicts — that is the caller's obligation**: a batch must not contain duplicates internally, nor collide with records already in the table. When that holds, every record costs nothing extra; when it does not, **Release builds log nothing and fail nothing** — the losing record is absent from the index (so `TruncateTable` never releases it, leaking a pool slot) yet is still written to the database (memory table and database silently diverge). **Debug builds are not silent**: the `bool` returned by `PrimaryKey->Insert` and each unique key's `Insert` is passed straight to `assert`, so a broken contract aborts the process immediately (only those two index kinds are asserted; secondary indexes are `std::multiset`, where duplicate keys are legitimate). A single `Insert` does pre-check: it returns `false` and releases the record on conflict.
+> **Record-ownership contract**: the record travels with the event. A row-change event (`RowChangeEvent`) is immutable once published and shared by every subscriber: `Insert` / `BatchInsert` carry a copy of the record (the in-memory table keeps the original), `Update` / `Erase` take over the record the caller created or the one just removed from the index, and the record's `RecordHandle` calls `record->Deallocate()` when the last reference goes away — so the writer never reads a live record out of the in-memory table. External producers building an event by hand hand the record over with `AdoptRecord(record)` and must not touch it afterwards. **`BatchInsert` does not check for key conflicts — that is the caller's obligation**: a batch must not contain duplicates internally, nor collide with records already in the table. When that holds, every record costs nothing extra; when it does not, **Release builds log nothing and fail nothing** — the losing record is absent from the index (so `TruncateTable` never releases it, leaking a pool slot) yet is still written to the database (memory table and database silently diverge). **Debug builds are not silent**: the `bool` returned by `PrimaryKey->Insert` and each unique key's `Insert` is passed straight to `assert`, so a broken contract aborts the process immediately (only those two index kinds are asserted; secondary indexes are `std::multiset`, where duplicate keys are legitimate). A single `Insert` does pre-check: it returns `false` and releases the record on conflict.
 
 ## 7. Integration Tests
 

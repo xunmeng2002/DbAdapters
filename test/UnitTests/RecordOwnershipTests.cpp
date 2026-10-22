@@ -3,10 +3,12 @@
 
 #include <DbAdapters/AsyncDbWriter/AsyncDbWriter.h>
 #include <DbAdapters/DbInterface/RecordHandle.h>
+#include <DbAdapters/DbInterface/RowChangeEvent.h>
 
 #include "doctest/doctest.h"
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -16,19 +18,27 @@ using namespace DbAdapters::RecordOwnershipTest;
 
 namespace
 {
+// 行变更一律以不可变事件发布：写出侧只认事件，记录归属挂在事件的句柄上
+RowChangeEventPtr MakeInsertEvent(unsigned int tableId, RecordHandle record, std::uint64_t sequence = 1)
+{
+    return std::make_shared<const RowChangeEvent>(tableId, RowChangeType::Insert, 0, sequence, true, std::move(record));
+}
+
 // AsyncDbWriter 析构会 delete 它持有的 Db, 故 Db 必须与 writer 同生共死:
 // 若把 RecordingDb 做成并列的成员对象, 成员析构顺序会让 writer 先析构再去 delete 一个已析构的 Db.
 class WriterHarness
 {
 public:
-    explicit WriterHarness(bool connectSucceeds = true)
+    explicit WriterHarness(bool ConnectSucceeds = true)
         : probeSchemas_{ &OwnershipProbeRecord::GetSchema() },
           schemaRegistry_(probeSchemas_, 1),
           writer_(new AsyncDbWriter(new RecordingDb(), &schemaRegistry_))
     {
-        Recorder().connectSucceeds = connectSucceeds;
+        Recorder().ConnectSucceeds = ConnectSucceeds;
         writer_->Start();
     }
+    // 表的同步状态由快照协议建立；归属测试只关心记录句柄，故跳过快照直接置就绪
+    void MarkProbeTableReady() { writer_->OnSnapshotComplete(0); }
     ~WriterHarness()
     {
         writer_->Stop();
@@ -49,60 +59,54 @@ private:
 
 TEST_SUITE("RecordOwnership")
 {
-TEST_CASE("借用不归还")
-{
-    WriterHarness harness;
-    std::atomic<int> releaseCount{ 0 };
-    std::unique_ptr<OwnershipProbeRecord> borrowedRecord{ AllocateProbeRecord(releaseCount, 1) };
-    harness.Writer().OnRecordInsert(0, BorrowRecord(borrowedRecord.get()));
-    REQUIRE(WaitUntil([&] { return harness.Recorder().insertCount.load() >= 1; }, 3000));
-    CHECK(harness.Recorder().insertedRecord == borrowedRecord.get());
-    CHECK(releaseCount.load() == 0);
-}
-
 TEST_CASE("移交恰好归还一次")
 {
     WriterHarness harness;
+    harness.MarkProbeTableReady();
     std::atomic<int> releaseCount{ 0 };
-    harness.Writer().OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 2)));
+    harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 2))));
     CHECK(WaitUntil([&] { return releaseCount.load() == 1; }, 3000));
 }
 
 TEST_CASE("批元素逐个恰好归还一次")
 {
     WriterHarness harness;
+    harness.MarkProbeTableReady();
     std::atomic<int> releaseCount{ 0 };
     OwnershipProbeRecord* firstRecord = AllocateProbeRecord(releaseCount, 20);
     OwnershipProbeRecord* middleRecord = AllocateProbeRecord(releaseCount, 21);
     OwnershipProbeRecord* lastRecord = AllocateProbeRecord(releaseCount, 22);
-    std::vector<RecordHandle> batchRecords;
-    batchRecords.push_back(AdoptRecord(firstRecord));
-    batchRecords.push_back(AdoptRecord(middleRecord));
-    batchRecords.push_back(AdoptRecord(lastRecord));
-    harness.Writer().OnRecordBatchInsert(0, std::move(batchRecords));
-    REQUIRE(WaitUntil([&] { return harness.Recorder().batchInsertCount.load() >= 1; }, 3000));
+    std::vector<RowChangeEventPtr> batchEvents;
+    batchEvents.push_back(MakeInsertEvent(0, AdoptRecord(firstRecord), 1));
+    batchEvents.push_back(MakeInsertEvent(0, AdoptRecord(middleRecord), 2));
+    batchEvents.push_back(MakeInsertEvent(0, AdoptRecord(lastRecord), 3));
+    harness.Writer().OnRowBatchChange(batchEvents);
+    batchEvents.clear();   // 批已由写库端持有；本函数这一份放手后才看得到归还
+    REQUIRE(WaitUntil([&] { return harness.Recorder().BatchInsertCount.load() >= 1; }, 3000));
     CHECK(WaitUntil([&] { return releaseCount.load() == 3; }, 3000));
-    CHECK(harness.Recorder().lastBatchRecordCount == 3);
-    CHECK(harness.Recorder().lastBatchFirstRecord == firstRecord);
-    CHECK(harness.Recorder().lastBatchLastRecord == lastRecord);
+    CHECK(harness.Recorder().LastBatchRecordCount == 3);
+    CHECK(harness.Recorder().LastBatchFirstRecord == firstRecord);
+    CHECK(harness.Recorder().LastBatchLastRecord == lastRecord);
 }
 
 TEST_CASE("执行抛异常仍恰好归还一次")
 {
     WriterHarness harness;
-    harness.Recorder().insertThrows = true;
+    harness.MarkProbeTableReady();
+    harness.Recorder().InsertThrows = true;
     std::atomic<int> releaseCount{ 0 };
-    harness.Writer().OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 30)));
+    harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 30))));
     CHECK(WaitUntil([&] { return releaseCount.load() == 1; }, 15000));
-    CHECK(harness.Recorder().disconnectCount.load() >= 1);
+    CHECK(harness.Recorder().DisconnectCount.load() >= 1);
 }
 
 TEST_CASE("断开丢弃待办时恰好归还一次")
 {
     WriterHarness harness(false);
+    harness.MarkProbeTableReady();
     std::atomic<int> releaseCount{ 0 };
-    harness.Writer().OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 40)));
-    harness.Writer().OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 41)));
+    harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 40))));
+    harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 41))));
     harness.Writer().DisConnect();
     CHECK(WaitUntil([&] { return releaseCount.load() == 2; }, 3000));
 }
@@ -112,7 +116,8 @@ TEST_CASE("析构抽干待办队列并归还记录")
     std::atomic<int> releaseCount{ 0 };
     {
         WriterHarness harness(false);
-        harness.Writer().OnRecordInsert(0, AdoptRecord(AllocateProbeRecord(releaseCount, 33)));
+        harness.MarkProbeTableReady();
+        harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 33))));
         CHECK(releaseCount.load() == 0);
     }
     CHECK(releaseCount.load() == 1);
@@ -121,10 +126,38 @@ TEST_CASE("析构抽干待办队列并归还记录")
 TEST_CASE("断连后写线程自行重连")
 {
     WriterHarness harness;
-    REQUIRE(WaitUntil([&] { return harness.Recorder().connectCount.load() >= 1; }, 3000));
-    const int connectCountBeforeDisconnect = harness.Recorder().connectCount.load();
+    REQUIRE(WaitUntil([&] { return harness.Recorder().ConnectCount.load() >= 1; }, 3000));
+    const int connectCountBeforeDisconnect = harness.Recorder().ConnectCount.load();
     harness.Writer().DisConnect();
-    CHECK(harness.Recorder().disconnectCount.load() >= 1);
-    CHECK(WaitUntil([&] { return harness.Recorder().connectCount.load() > connectCountBeforeDisconnect; }, 3000));
+    CHECK(harness.Recorder().DisconnectCount.load() >= 1);
+    CHECK(WaitUntil([&] { return harness.Recorder().ConnectCount.load() > connectCountBeforeDisconnect; }, 3000));
+}
+
+TEST_CASE("断连期间增量就地丢弃")
+{
+    WriterHarness harness;
+    REQUIRE(WaitUntil([&] { return harness.Recorder().ConnectCount.load() >= 1; }, 3000));
+    harness.MarkProbeTableReady();
+    harness.Writer().DisConnect();
+    std::atomic<int> releaseCount{ 0 };
+    harness.Writer().OnRowChange(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 50))));
+    CHECK(releaseCount.load() == 1);
+    CHECK(harness.Writer().PendingOperateCount() == 0);
+    CHECK(harness.Recorder().InsertCount.load() == 0);
+}
+
+TEST_CASE("快照批量在同步期间不被丢弃")
+{
+    WriterHarness harness;
+    harness.Writer().OnSnapshotBegin(0);
+    std::atomic<int> releaseCount{ 0 };
+    std::vector<RowChangeEventPtr> batchEvents;
+    batchEvents.push_back(MakeInsertEvent(0, AdoptRecord(AllocateProbeRecord(releaseCount, 60))));
+    harness.Writer().OnRowBatchChange(batchEvents);
+    batchEvents.clear();   // 批已由写库端持有；本函数这一份放手后才看得到归还
+    REQUIRE(WaitUntil([&] { return harness.Recorder().BatchInsertCount.load() >= 1; }, 3000));
+    CHECK(harness.Recorder().TruncateTableCount.load() >= 1);
+    CHECK(harness.Recorder().LastBatchRecordCount == 1);
+    CHECK(WaitUntil([&] { return releaseCount.load() == 1; }, 3000));
 }
 }
