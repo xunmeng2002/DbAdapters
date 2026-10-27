@@ -7,6 +7,7 @@
 #include <vector>
 
 using namespace std;
+using namespace DbAdapters;
 using namespace Spark::Core;
 
 namespace

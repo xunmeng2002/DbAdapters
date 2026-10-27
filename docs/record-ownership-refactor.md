@@ -161,7 +161,7 @@ RecordHandle BorrowRecord(Record* record) noexcept
 
 **不做批级归还函数**（决策 3）：单次与批共用同一个 `RecordHandle`，只有一种归属语义、只有一处 move/Reset 实现（Harness §5 DRY 要求）。代价是 staging 数组每元素 8 B → 16 B。
 
-实测记录体量（`Spark/include/Spark/Types.h:163-190`：`DateType`=char[16]、`ExchangeIdType`=char[8]、`ExchangeNameType`=char[64]、`InstrumentIdType`=char[32]）：
+实测记录体量（Mdb 契约类型：`DateType`=char[16]、`ExchangeIdType`=char[8]、`ExchangeNameType`=char[64]、`InstrumentIdType`=char[32]）：
 
 | 记录 | 量级 |
 | :--- | :--- |

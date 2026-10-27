@@ -62,10 +62,10 @@ Created by [Fireseeker](https://fireseeker.cn/)
 ```cpp
 #include <DbAdapters/BackendLoader/DbBackendLoader.h>
 
-// 按后端种类装载：种类取自 Spark 的 DbTypeType（本库不自备枚举），模块名（含 .dll/.so 与
-// 调试后缀）全由装载器自己拼，调用方不参与。
+// 按后端种类装载：种类取自本库的 DbTypeType，模块名（含 .dll/.so 与调试后缀）全由装载器
+// 自己拼，调用方不参与。
 DbAdapters::Db* backend = DbAdapters::LoadDatabaseBackend(
-    DbTypeType::MysqlDb, "mysqlx://user:pass@localhost:33060/mdb", "", "");
+    DbAdapters::DbTypeType::MysqlDb, "mysqlx://user:pass@localhost:33060/mdb", "", "");
 // ... 使用 backend ...
 delete backend;
 ```
@@ -119,7 +119,8 @@ DbAdapters/
 │   ├── SqliteWrapper/            # SQLite 适配器
 │   ├── DuckdbWrapper/            # DuckDB 适配器
 │   ├── MysqlWrapper/             # MySQL 适配器
-│   └── MariadbWrapper/           # MariaDB 适配器
+│   ├── MariadbWrapper/           # MariaDB 适配器
+│   └── Types.h                   # 全库共享的类型词表（DbOperateType / DbTypeType）
 ├── src/DbAdapters/               # 源码实现
 │   ├── BackendLoader/            # 运行时装载实现
 │   ├── AsyncDbWriter/            # 异步写库实现
@@ -175,7 +176,7 @@ DbAdapters/
 
 | 依赖 | 安装位置 | 提供内容 |
 | --- | --- | --- |
-| **Spark** 基础库 | `../Libs/Spark/<triplet>` | `Spark::Core`（线程、日志、对象池）、`Spark/Types.h` 类型定义 |
+| **Spark** 基础库 | `../Libs/Spark/<triplet>` | `Spark::Core`（线程、日志、对象池） |
 | **DuckDB** | `../Libs/duckdb/<triplet>` | `duckdb::duckdb`（头文件 + 运行时库） |
 
 `<triplet>` 在 Windows 下为 `x64-windows`，Linux / WSL 下为 `x64-linux`。Spark 库的构建与安装方法参见 [Spark 仓库](https://gitee.com/xunmeng2002/Spark.git) 的 README。
@@ -270,8 +271,8 @@ target_link_libraries(YourTarget PRIVATE
 
 **消费方必须自己准备 Spark**。`DbAdaptersConfig.cmake` 的第一条就是 `find_dependency(Spark CONFIG)`，
 故配置期 `Spark` 必须能被找到（`Spark_DIR` 或 `CMAKE_PREFIX_PATH`）；此外下列公开头还直接 include Spark：
-`AsyncDbWriter.h` 拉 `<Spark/Core/Core.h>`，`DbBackendLoader.h` 与 `MdbSubscriber.h` 拉
-`<Spark/Types.h>`，`FailureLogThrottle.h` 拉 `<Spark/Core/Logger/Logger.h>`。而导出集里 Spark 只以
+`AsyncDbWriter.h` 拉 `<Spark/Core/Core.h>`，`FailureLogThrottle.h` 拉 `<Spark/Core/Logger/Logger.h>`。
+本库自有类型（`DbOperateType` / `DbTypeType`）定义在 `<DbAdapters/Types.h>`，不再取用 Spark 的类型定义。而导出集里 Spark 只以
 `$<LINK_ONLY:Spark::Core>` 挂在 `BackendLoaderStatic` 上——该项只影响链接行，**不传播 include 目录**。
 因此用了上述任何一个头，消费方都得自己再接一次：
 
@@ -611,6 +612,6 @@ int main()
 
 - **包含路径**：头文件统一使用 `#include <DbAdapters/Module/HeaderName.h>` 风格
 - **命名空间**：全部接口位于 `DbAdapters` 命名空间
-- **依赖 Spark**：线程、日志、对象池、`DbOperateType` 等类型定义来自 [Spark](https://gitee.com/xunmeng2002/Spark.git) 基础库
+- **依赖 Spark**：线程、日志、对象池来自 [Spark](https://gitee.com/xunmeng2002/Spark.git) 基础库；`DbOperateType` / `DbTypeType` 等本库自有类型定义在 `<DbAdapters/Types.h>`
 - **跨库差异**：MySQL 使用 MyISAM 引擎与 `utf8mb4_bin` 排序规则；DuckDB 的 `TruncateTable` 实际执行 `DELETE FROM`；SQLite / DuckDB 单文件库与内存库（`:memory:`）均可直接使用
 - **切换后端**：同一套 `TableSchema` 与业务代码可直接在四种数据库间切换，仅需替换适配器构造参数

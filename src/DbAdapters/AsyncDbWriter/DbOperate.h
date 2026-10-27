@@ -1,6 +1,6 @@
 #pragma once
 #include <DbAdapters/DbInterface/RowChangeEvent.h>
-#include <Spark/Types.h>
+#include <DbAdapters/Types.h>
 
 namespace DbAdapters
 {

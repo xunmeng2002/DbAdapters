@@ -1,7 +1,7 @@
 #pragma once
 #include <DbAdapters/DbInterface/RecordHandle.h>
 #include <DbAdapters/DbInterface/RowChangeEvent.h>
-#include <Spark/Types.h>
+#include <DbAdapters/Types.h>
 #include <atomic>
 #include <vector>
 

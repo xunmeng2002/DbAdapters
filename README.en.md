@@ -61,11 +61,11 @@ When all four adapters are linked, they and their client libraries enter the add
 ```cpp
 #include <DbAdapters/BackendLoader/DbBackendLoader.h>
 
-// Load by backend kind: the kind comes from Spark's DbTypeType (this library keeps no
-// enum of its own); the module name — including the .dll/.so suffix and the debug
-// postfix — is assembled by the loader itself, not by the caller.
+// Load by backend kind: the kind comes from this library's DbTypeType; the module name —
+// including the .dll/.so suffix and the debug postfix — is assembled by the loader
+// itself, not by the caller.
 DbAdapters::Db* backend = DbAdapters::LoadDatabaseBackend(
-    DbTypeType::MysqlDb, "mysqlx://user:pass@localhost:33060/mdb", "", "");
+    DbAdapters::DbTypeType::MysqlDb, "mysqlx://user:pass@localhost:33060/mdb", "", "");
 // ... use backend ...
 delete backend;
 ```
@@ -110,7 +110,8 @@ DbAdapters/
 │   ├── SqliteWrapper/            # SQLite adapter
 │   ├── DuckdbWrapper/            # DuckDB adapter
 │   ├── MysqlWrapper/             # MySQL adapter
-│   └── MariadbWrapper/           # MariaDB adapter
+│   ├── MariadbWrapper/           # MariaDB adapter
+│   └── Types.h                   # Library-wide type vocabulary (DbOperateType / DbTypeType)
 ├── src/DbAdapters/               # Source code
 │   ├── BackendLoader/            # Runtime loading implementation
 │   ├── AsyncDbWriter/            # Async writer implementation
@@ -166,7 +167,7 @@ The build depends on two **prebuilt third-party libraries** that must first be i
 
 | Dependency | Install location | Provides |
 | --- | --- | --- |
-| **Spark** foundational library | `../Libs/Spark/<triplet>` | `Spark::Core` (threading, logging, object pool), type definitions in `Spark/Types.h` |
+| **Spark** foundational library | `../Libs/Spark/<triplet>` | `Spark::Core` (threading, logging, object pool) |
 | **DuckDB** | `../Libs/duckdb/<triplet>` | `duckdb::duckdb` (headers + runtime library) |
 
 `<triplet>` is `x64-windows` on Windows and `x64-linux` on Linux / WSL. See the [Spark repository](https://gitee.com/xunmeng2002/Spark.git) README for how to build and install Spark.
@@ -266,8 +267,9 @@ Seven targets are exported: `DbInterface` (the interface target), the four wrapp
 **The consumer must provide Spark itself.** The very first line of `DbAdaptersConfig.cmake` is
 `find_dependency(Spark CONFIG)`, so `Spark` has to be locatable at configure time (`Spark_DIR` or
 `CMAKE_PREFIX_PATH`). On top of that, these public headers also include Spark directly:
-`AsyncDbWriter.h` pulls `<Spark/Core/Core.h>`, `DbBackendLoader.h` and `MdbSubscriber.h` pull
-`<Spark/Types.h>`, and `FailureLogThrottle.h` pulls `<Spark/Core/Logger/Logger.h>`. In the export set
+`AsyncDbWriter.h` pulls `<Spark/Core/Core.h>`, and `FailureLogThrottle.h` pulls
+`<Spark/Core/Logger/Logger.h>`. This library's own types (`DbOperateType` / `DbTypeType`) live in
+`<DbAdapters/Types.h>` and no longer come from Spark. In the export set
 Spark appears only as `$<LINK_ONLY:Spark::Core>` on `BackendLoaderStatic` — that governs the link
 line and **does not propagate include directories**. So a consumer using any of those headers has to
 wire it up once:
@@ -612,6 +614,6 @@ can be run separately.
 
 - **Include style**: headers use the `#include <DbAdapters/Module/HeaderName.h>` convention
 - **Namespace**: all interfaces live in the `DbAdapters` namespace
-- **Spark dependency**: threading, logging, object pooling, and type definitions such as `DbOperateType` come from the [Spark](https://gitee.com/xunmeng2002/Spark.git) foundational library
+- **Spark dependency**: threading, logging, and object pooling come from the [Spark](https://gitee.com/xunmeng2002/Spark.git) foundational library; this library's own types such as `DbOperateType` / `DbTypeType` live in `<DbAdapters/Types.h>`
 - **Cross-database differences**: MySQL uses the MyISAM engine with the `utf8mb4_bin` collation; DuckDB's `TruncateTable` actually executes `DELETE FROM`; SQLite / DuckDB file-based and in-memory (`:memory:`) databases can both be used directly
 - **Switching backends**: the same `TableSchema` and business code can switch between all four databases by simply changing the adapter constructor arguments

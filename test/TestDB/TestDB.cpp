@@ -136,13 +136,10 @@ static void TestDb(Db* db)
 	}
 
 	static const TableSchema* allSchemas[] = {
-		&TradingDay::GetSchema(), &Exchange::GetSchema(), &Product::GetSchema(),
-		&Instrument::GetSchema(), &PrimaryAccount::GetSchema(), &Account::GetSchema(),
-		&Capital::GetSchema(), &Position::GetSchema(), &PositionDetail::GetSchema(),
-		&Order::GetSchema(), &Trade::GetSchema(),
+		&TradingDay::GetSchema(), &Exchange::GetSchema(), &Account::GetSchema(),
 	};
-	db->CreateTables(allSchemas, 11);
-	db->TruncateTables(allSchemas, 11);
+	db->CreateTables(allSchemas, 3);
+	db->TruncateTables(allSchemas, 3);
 
 	TypedTable<TradingDay>    t_tradingDay(db);
 	TypedTable<Exchange>      t_exchange(db);

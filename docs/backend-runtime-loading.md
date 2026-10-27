@@ -90,10 +90,9 @@ include/DbAdapters/BackendLoader/DbBackendLoader.h 公开头：2 个函数声明
 src/DbAdapters/BackendLoader/DbBackendLoader.cpp   实现：平台头、#ifdef、模块基名表与调试后缀全在这里
 ```
 
-后端种类用 **Spark 的 `DbTypeType`**（`Spark/Types.h`，全局作用域：`DuckDb=0` / `SqliteDb=1` /
-`MysqlDb=2` / `MariaDb=3`），本库**不自备枚举** —— 引擎配置里 `DbType` 那些字面量正是照它生成
-的，本库再来一套就是同一件事的第三种写法。该头的包含路径由 `BackendLoaderStatic` 私有链接
-`Spark::Core` 取得；消费方本就是 Spark 系工程，各自链接 `Spark::Core`。
+后端种类用本库的 **`DbAdapters::DbTypeType`**（`DbAdapters/Types.h`，命名空间 `DbAdapters`：
+`DuckDb=0` / `SqliteDb=1` / `MysqlDb=2` / `MariaDb=3`），取值与引擎配置里 `DbType` 的字面量
+一致。该头自包含，不依赖 Spark 的类型定义。
 
 若做成 header-only，任何 `#include` 它的编译单元都会被拖进 `<windows.h>` 与 `NOMINMAX` /
 `WIN32_LEAN_AND_MEAN` 两道宏 —— 那是实现细节，不该由使用者承担。收进 `.cpp` 之后，公开头里
@@ -150,22 +149,22 @@ Debug 与 Release 取到同一个值。
 
 ## 七、调用方怎么用
 
-以 QuantTrading 为例，它只保留「配置整数 → `DbTypeType`」这一段校验，
+以 QuantTrading 为例，它只保留「配置整数 → `DbAdapters::DbTypeType`」这一段校验，
 见 `src/QuantTradingCommon/DatabaseAdapterFactory.h`：
 
 | `DbType` | 后端种类 | 取法 |
 | ---- | ---- | ---- |
-| `0` DuckDB | `DbTypeType::DuckDb` | `LoadDatabaseBackend(DbTypeType::DuckDb, …)` |
-| `1` SQLite（缺省） | `DbTypeType::SqliteDb` | `LoadDatabaseBackend(DbTypeType::SqliteDb, …)` |
-| `2` MySQL | `DbTypeType::MysqlDb` | `LoadDatabaseBackend(DbTypeType::MysqlDb, …)` |
-| `3` MariaDB | `DbTypeType::MariaDb` | `LoadDatabaseBackend(DbTypeType::MariaDb, …)` |
+| `0` DuckDB | `DbAdapters::DbTypeType::DuckDb` | `LoadDatabaseBackend(DbAdapters::DbTypeType::DuckDb, …)` |
+| `1` SQLite（缺省） | `DbAdapters::DbTypeType::SqliteDb` | `LoadDatabaseBackend(DbAdapters::DbTypeType::SqliteDb, …)` |
+| `2` MySQL | `DbAdapters::DbTypeType::MysqlDb` | `LoadDatabaseBackend(DbAdapters::DbTypeType::MysqlDb, …)` |
+| `3` MariaDB | `DbAdapters::DbTypeType::MariaDb` | `LoadDatabaseBackend(DbAdapters::DbTypeType::MariaDb, …)` |
 
 **四个后端走同一条路**，消费方不写「哪个后端怎么建」：模块名、平台前后缀、Debug 后缀全在本库内
 （§四）。某个仓与某个适配器有编译期依赖时，那条依赖写在它自己的 `CMakeLists` 链接行上，不写在
 建适配器的那个函数里 —— 依赖变了不必回头改那段代码。
 
 **种类枚举就是配置取值**：QuantTrading 的配置模型（`Model/Configs/*.xml`）把 `DbType` 声明成
-`int`，生成出来的 `Config` 逐字读它，取值即 `DbTypeType` 的枚举值 —— 两处是同一个数，故消费方
+`int`，生成出来的 `Config` 逐字读它，取值即 `DbAdapters::DbTypeType` 的枚举值 —— 两处是同一个数，故消费方
 只剩「越界校验 + 恒等转换」，没有自己的字面量表。本库只需要知道「有哪四个后端、各自模块叫什么」。
 
 **越界一律拒，不退化成缺省**：配置模型只声明 `DbType` 是 `int`，没有取值域，一个写错的取值本来

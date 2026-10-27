@@ -51,8 +51,7 @@ namespace DbAdapters
         }
 
         // 模块基名是本库自己的知识 (见本仓 CMakeLists 里那四个 add_shared_module), 故"哪种后端对应
-        // 哪个模块"留在这里; 种类本身用 Spark 的 DbTypeType, 本库不自备. 越界的种类返回 nullptr,
-        // 由调用方报错.
+        // 哪个模块"留在这里. 越界的种类返回 nullptr, 由调用方报错.
         constexpr const char* BackendModuleBaseName(DbTypeType dbType)
         {
             switch (dbType)
