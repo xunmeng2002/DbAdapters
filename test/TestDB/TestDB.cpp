@@ -1040,17 +1040,20 @@ static bool TestAsyncWriterRecordOwnership()
     const TableSchema* probeSchema = &OwnershipProbeRecord::GetSchema();
     StaticSchemaRegistry schemaRegistry(&probeSchema, 1);
 
-    AsyncDbWriter* writer = new AsyncDbWriter(make_unique<SqliteWrapper>(sqliteDbName), &schemaRegistry);
+    // 借用点必须放在交出所有权之前: writer 构造后 Db 已归写线程, 不再对外交出指针
+    unique_ptr<SqliteWrapper> ownedDatabase = make_unique<SqliteWrapper>(sqliteDbName);
+    Db* borrowedDatabase = ownedDatabase.get();
+    AsyncDbWriter* writer = new AsyncDbWriter(move(ownedDatabase), &schemaRegistry);
     // 建表与清表在写线程启动前完成: 此时独占 Db, 不存在与写线程的并发访问.
-    writer->GetDb()->CreateTables(&probeSchema, 1);
-    writer->GetDb()->TruncateTables(&probeSchema, 1);
+    borrowedDatabase->CreateTables(&probeSchema, 1);
+    borrowedDatabase->TruncateTables(&probeSchema, 1);
     writer->Start();
     // 没有内存库时表状态不会自行建立：按快照协议宣布该表已同步，否则增量按"断连"丢弃
     writer->OnSnapshotComplete(0);
     writer->OnRowChange(std::make_shared<const RowChangeEvent>(
         0, RowChangeType::Insert, 0, 1, true, AdoptRecord(AllocateProbeRecord(releaseCount, 1))));
 
-    TypedTable<OwnershipProbeRecord> probeTable(writer->GetDb());
+    TypedTable<OwnershipProbeRecord> probeTable(borrowedDatabase);
     std::vector<OwnershipProbeRecord*> probeRows;
     const bool rowWritten = WaitUntil([&]
     {

@@ -34,7 +34,9 @@ public:
 	AsyncDbWriter(std::unique_ptr<Db> db, SchemaRegistry* schemaRegistry);
 	~AsyncDbWriter();
 	void Subscribe(DbSubscriber* dbSubscriber);
-	Db* GetDb();
+	// 只回答「手上有没有 Db」：构造时传空表示建库失败，此时写库线程无从工作。
+	// 不再对外交出 Db 指针——所有权已归写库线程，借用点应放在 std::move 之前
+	bool HasDb() const;
 	bool Connect();
 	void DisConnect();
 	// 待写操作数：断连期间恒为 0，非 0 即"已入队但还没提交给后端"

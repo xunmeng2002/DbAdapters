@@ -30,8 +30,13 @@ public:
     explicit WriterHarness(bool ConnectSucceeds = true)
         : probeSchemas_{ &OwnershipProbeRecord::GetSchema() },
           schemaRegistry_(probeSchemas_, 1),
-          writer_(std::make_unique<AsyncDbWriter>(std::make_unique<RecordingDb>(), &schemaRegistry_))
+          recorder_(nullptr),
+          writer_(nullptr)
     {
+        // 借用点放在交出所有权之前: writer 构造后 Db 已归写线程, 不再对外交出指针
+        std::unique_ptr<RecordingDb> ownedRecorder = std::make_unique<RecordingDb>();
+        recorder_ = ownedRecorder.get();
+        writer_ = std::make_unique<AsyncDbWriter>(std::move(ownedRecorder), &schemaRegistry_);
         Recorder().ConnectSucceeds = ConnectSucceeds;
         writer_->Start();
     }
@@ -45,12 +50,13 @@ public:
     WriterHarness(const WriterHarness&) = delete;
     WriterHarness& operator=(const WriterHarness&) = delete;
 
-    RecordingDb& Recorder() { return *static_cast<RecordingDb*>(writer_->GetDb()); }
+    RecordingDb& Recorder() { return *recorder_; }
     AsyncDbWriter& Writer() { return *writer_; }
 
 private:
     const TableSchema* probeSchemas_[1];
     StaticSchemaRegistry schemaRegistry_;
+    RecordingDb* recorder_;
     std::unique_ptr<AsyncDbWriter> writer_;
 };
 }

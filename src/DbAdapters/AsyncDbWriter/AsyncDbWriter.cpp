@@ -54,9 +54,9 @@ void AsyncDbWriter::Subscribe(DbSubscriber* dbSubscriber)
 {
 	dbSubscriber_ = dbSubscriber;
 }
-Db* AsyncDbWriter::GetDb()
+bool AsyncDbWriter::HasDb() const
 {
-	return db_.get();
+	return db_ != nullptr;
 }
 bool AsyncDbWriter::Connect()
 {
