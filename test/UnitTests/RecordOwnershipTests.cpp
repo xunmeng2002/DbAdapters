@@ -24,15 +24,13 @@ RowChangeEventPtr MakeInsertEvent(unsigned int tableId, RecordHandle record, std
     return std::make_shared<const RowChangeEvent>(tableId, RowChangeType::Insert, 0, sequence, true, std::move(record));
 }
 
-// AsyncDbWriter 析构会 delete 它持有的 Db, 故 Db 必须与 writer 同生共死:
-// 若把 RecordingDb 做成并列的成员对象, 成员析构顺序会让 writer 先析构再去 delete 一个已析构的 Db.
 class WriterHarness
 {
 public:
     explicit WriterHarness(bool ConnectSucceeds = true)
         : probeSchemas_{ &OwnershipProbeRecord::GetSchema() },
           schemaRegistry_(probeSchemas_, 1),
-          writer_(new AsyncDbWriter(new RecordingDb(), &schemaRegistry_))
+          writer_(std::make_unique<AsyncDbWriter>(std::make_unique<RecordingDb>(), &schemaRegistry_))
     {
         Recorder().ConnectSucceeds = ConnectSucceeds;
         writer_->Start();

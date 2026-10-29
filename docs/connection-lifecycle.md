@@ -117,8 +117,11 @@ Mdb 侧的 `OnDbConnected()` 落到 `InitDb()`：`CreateTables()`，随后每张
 ### 析构
 
 ```text
-~AsyncDbWriter() = Stop(); Join(); DropPendingOperates("Destructor"); delete db_;
+~AsyncDbWriter() = Stop(); Join(); DropPendingOperates("Destructor");
 ```
+
+`db_` 是 `std::unique_ptr<Db>`，构造函数收 `std::unique_ptr<Db>` 即取得所有权，析构时随成员的
+析构顺序自行释放——所有权写在签名里，调用方无法把它当成借用。
 
 `Stop()` / `Join()` 都是幂等的（`Stop()` 只置标志，`Join()` 先查 `joinable()`），与紧随其后的
 `~ThreadBase()`（同样是 `Stop(); Join();`）重复调用无副作用。
@@ -130,7 +133,7 @@ Mdb 侧的 `OnDbConnected()` 落到 `InitDb()`：`CreateTables()`，随后每张
 
 以下五条是本设计的既定取舍，已知且不修，改动前请先评估是否真的值得动：
 
-1. **析构期间的并发入队**：若另一线程在 `DropPendingOperates()` 与 `delete db_` 之间调用
+1. **析构期间的并发入队**：若另一线程在 `DropPendingOperates()` 之后、`db_` 释放之前调用
    `OnRowChange`，这些操作会随 `dbOperates_` 一起漏掉。前提是调用方违反「先
    `Stop()` / `Join()` 再改表」的纪律。
 2. **resync 不重试**：`OnDbConnected()` 抛异常后 resync 不会补做，要等下一次断连。

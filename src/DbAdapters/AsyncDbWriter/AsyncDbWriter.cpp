@@ -40,8 +40,8 @@ DbOperateType ToDbOperateType(DbAdapters::RowChangeType rowChangeType)
 
 namespace DbAdapters
 {
-AsyncDbWriter::AsyncDbWriter(Db* db, SchemaRegistry* schemaRegistry)
-	:ThreadBase("AsyncDbWriter"), db_(db), schemaRegistry_(schemaRegistry), dbSubscriber_(nullptr)
+AsyncDbWriter::AsyncDbWriter(unique_ptr<Db> db, SchemaRegistry* schemaRegistry)
+	:ThreadBase("AsyncDbWriter"), db_(move(db)), schemaRegistry_(schemaRegistry), dbSubscriber_(nullptr)
 {
 }
 AsyncDbWriter::~AsyncDbWriter()
@@ -49,7 +49,6 @@ AsyncDbWriter::~AsyncDbWriter()
 	Stop();
 	Join();
 	DropPendingOperates("Destructor");
-	delete db_;
 }
 void AsyncDbWriter::Subscribe(DbSubscriber* dbSubscriber)
 {
@@ -57,7 +56,7 @@ void AsyncDbWriter::Subscribe(DbSubscriber* dbSubscriber)
 }
 Db* AsyncDbWriter::GetDb()
 {
-	return db_;
+	return db_.get();
 }
 bool AsyncDbWriter::Connect()
 {

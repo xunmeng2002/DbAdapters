@@ -1040,7 +1040,7 @@ static bool TestAsyncWriterRecordOwnership()
     const TableSchema* probeSchema = &OwnershipProbeRecord::GetSchema();
     StaticSchemaRegistry schemaRegistry(&probeSchema, 1);
 
-    AsyncDbWriter* writer = new AsyncDbWriter(new SqliteWrapper(sqliteDbName), &schemaRegistry);
+    AsyncDbWriter* writer = new AsyncDbWriter(make_unique<SqliteWrapper>(sqliteDbName), &schemaRegistry);
     // 建表与清表在写线程启动前完成: 此时独占 Db, 不存在与写线程的并发访问.
     writer->GetDb()->CreateTables(&probeSchema, 1);
     writer->GetDb()->TruncateTables(&probeSchema, 1);

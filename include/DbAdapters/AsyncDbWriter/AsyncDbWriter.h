@@ -10,6 +10,7 @@
 #include <Spark/Core/Core.h>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <condition_variable>
 #include <vector>
@@ -29,7 +30,8 @@ enum class TableSyncState : std::uint8_t
 class ASYNCDBWRITER_EXPORTS AsyncDbWriter : public Spark::Core::ThreadBase, public MdbReplicaSubscriber
 {
 public:
-	AsyncDbWriter(Db* db, SchemaRegistry* schemaRegistry);
+	// Db 所有权随构造转入，由写库线程在析构时释放：交出后调用方不得再访问或释放
+	AsyncDbWriter(std::unique_ptr<Db> db, SchemaRegistry* schemaRegistry);
 	~AsyncDbWriter();
 	void Subscribe(DbSubscriber* dbSubscriber);
 	Db* GetDb();
@@ -74,7 +76,7 @@ private:
 
 	// 连接失败按固定重试次数节流上报：每轮 Run 都会重试一次连接，不节流会按 timeOut_ 频率刷屏
 	static constexpr int connectFailureReportInterval_ = 100;
-	Db* db_;
+	std::unique_ptr<Db> db_;
 	SchemaRegistry* schemaRegistry_;
 	DbSubscriber* dbSubscriber_;
 	std::list<DbOperate*> dbOperates_;
