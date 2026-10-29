@@ -131,7 +131,8 @@ DbAdapters/
 ├── test/                         # 测试程序
 │   ├── TestDB/                   # 四库一体化集成测试 + DuckDB 向量化读取测试
 │   ├── UnitTests/                # 单元测试（doctest）：记录归属语义，无后端、无 DLL
-│   ├── Common/                   # 两个测试目标共用的测试支撑（含真后端用例也要用的探针记录）
+│   ├── Benchmarks/               # 基准程序：AsyncDbWriter 流水线 + SQLite / DuckDB 内存库写入
+│   ├── Common/                   # 单元测试与基准共用的测试支撑（含真后端用例也要用的探针记录）
 │   └── CMakeLists.txt
 ├── docs/                         # 文档
 │   ├── backend-runtime-loading.md # 后端运行时按配置装载（设计说明）
@@ -229,7 +230,7 @@ cmake --preset WSL-GCC-Release
 cmake --build out/build/WSL-GCC-Release
 ```
 
-`BUILD_TESTS` **默认 `ON`**，上面两条命令会把 `test/`（`TestDB` 与 `UnitTests`）一并编出来；配置期
+`BUILD_TESTS` **默认 `ON`**，上面两条命令会把 `test/`（`TestDB`、`UnitTests` 与基准）一并编出来；配置期
 因此会执行 `find_package(doctest CONFIG REQUIRED PATHS "../Libs/doctest")`，该目录必须先就位（见
 [`docs/environment-setup.md`](docs/environment-setup.md) §1.7）。只编库、不想准备 doctest 的消费者
 加 `-DBUILD_TESTS=OFF` 即可跳过 `test/`，此时那条 `find_package` 不会执行。
@@ -602,13 +603,57 @@ int main()
 > `RecordHandle` 的归还回调若抛异常会直接 `std::terminate`（析构为 `noexcept`），
 > doctest 无死亡测试，这条契约属已知测试盲区，由头文件注释说明。
 
-## 九、许可证 & 声明
+## 九、基准测试
+
+`test/Benchmarks` 含三支基准，共用 Spark 的公开计时器 `<Spark/TemplateLib/Benchmark/BenchmarkRunner.h>` 与
+兄弟仓的取样口径。按测的层次分两类。
+
+**`BenchAsyncWriter`：只测 DbAdapters 自身开销，没有真实数据库。** 以只记账的 `RecordingDb` 串起
+「构造记录 → 发布事件 → 入队 → 写线程取走 → 后端写入 → 归还记录」整条链路，
+链路止于 `Db::Insert` / `Db::BatchInsert` 的一次虚调用，不含 SQL 拼装、语句执行与 IO。
+
+| 输出行 | 含义 |
+| :--- | :--- |
+| `RowChangeEvent.make_shared` | 单条事件的构造与析构（记录分配 + `shared_ptr`） |
+| `Pipeline.single_row` | `OnRowChange` 一次往返，含写线程唤醒与写库执行 |
+| `Pipeline.batch.N` | `OnRowBatchChange` 一次往返；单记录成本按 `N` 相除 |
+
+**`BenchSqlite` / `BenchDuckdb`：真实内存库（`":memory:"`），测适配器 + 驱动的写入成本。**
+每档先清表再写固定行数，5 次取样取中位数；`batch_size = 1` 走 `Db::Insert`（逐条自动提交），
+大于 1 走 `Db::BatchInsert`（整批一个事务）。每轮都读回行数核对，避免「一条都没写进去」得出漂亮数字。
+
+| 输出列 | 含义 |
+| :--- | :--- |
+| `backend` | `sqlite` 或 `duckdb` |
+| `batch_size` | 每批行数；1 对应 `Insert`，其余对应 `BatchInsert` |
+| `ns_per_record` | 单记录写入耗时（5 次中位数） |
+| `ns_slowest` | 最慢一次的单记录耗时 |
+| `records_per_sample` | 自适应出的每样本行数（约 50 ms 的量） |
+
+```bash
+# Windows
+./bin/Release/BenchAsyncWriter.exe
+./bin/Release/BenchSqlite.exe
+./bin/Release/BenchDuckdb.exe
+
+# Linux
+./bin/Release/BenchAsyncWriter
+./bin/Release/BenchSqlite
+./bin/Release/BenchDuckdb
+```
+
+> **注意**：MySQL / MariaDB 需要本地服务，未纳入基准；它们的 `BatchInsert` 同样是「事务内逐条 Insert」。
+
+> **注意**：数值只在 Release 下有意义；Debug 构建会在表头前打印 `unoptimized` 警告，仅用于验证基准本身能跑通。
+> 基准由 `BUILD_BENCHMARKS`（默认 `ON`）控制，且只在 `BUILD_TESTS=ON` 时生效。
+
+## 十、许可证 & 声明
 
 - **开源协议**：BSD-4-Clause，详见 [LICENSE](LICENSE) 文件
 - **适用范围**：本项目仅供个人学习、研究使用
 - **风险提示**：本库为个人开源项目，生产环境使用请自行充分测试并评估风险
 
-## 十、补充说明
+## 十一、补充说明
 
 - **包含路径**：头文件统一使用 `#include <DbAdapters/Module/HeaderName.h>` 风格
 - **命名空间**：全部接口位于 `DbAdapters` 命名空间

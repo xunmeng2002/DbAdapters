@@ -122,7 +122,8 @@ DbAdapters/
 ├── test/                         # Test programs
 │   ├── TestDB/                   # All-in-one integration tests for four DBs + DuckDB vectorized-read tests
 │   ├── UnitTests/                # doctest unit tests (no backend, no DLL)
-│   ├── Common/                   # Test support shared by both test targets
+│   ├── Benchmarks/               # Benchmarks: AsyncDbWriter pipeline + SQLite / DuckDB in-memory writes
+│   ├── Common/                   # Test support shared by unit tests and benchmarks
 │   └── CMakeLists.txt
 ├── docs/                         # Documentation
 │   ├── backend-runtime-loading.md # Runtime backend loading (design notes, Chinese)
@@ -220,8 +221,8 @@ cmake --preset WSL-GCC-Release
 cmake --build out/build/WSL-GCC-Release
 ```
 
-`BUILD_TESTS` **defaults to `ON`**, so the two commands above also build `test/` (`TestDB` and
-`UnitTests`); configure therefore runs `find_package(doctest CONFIG REQUIRED PATHS "../Libs/doctest")`,
+`BUILD_TESTS` **defaults to `ON`**, so the two commands above also build `test/` (`TestDB`,
+`UnitTests`, and the benchmarks); configure therefore runs `find_package(doctest CONFIG REQUIRED PATHS "../Libs/doctest")`,
 and that directory must be in place first (see
 [`docs/environment-setup.en.md`](docs/environment-setup.en.md) §1.7). A library-only consumer that does not
 want to provide doctest can pass `-DBUILD_TESTS=OFF` to skip `test/`; the `find_package` above then
@@ -604,13 +605,63 @@ can be run separately.
 > is `noexcept`); doctest has no death tests, so that contract is a known test blind spot covered
 > by the header's comments.
 
-## 9. License & Disclaimer
+## 9. Benchmarks
+
+`test/Benchmarks` ships three benchmarks that reuse Spark's public timer
+`<Spark/TemplateLib/Benchmark/BenchmarkRunner.h>` and the sibling repositories' sampling convention.
+They measure two different layers.
+
+**`BenchAsyncWriter`: DbAdapters' own overhead only, no real database.** A recording-only stand-in
+backend drives the whole record construction → event publish → enqueue → writer thread → backend write
+→ record release chain; it stops at the virtual `Db::Insert` / `Db::BatchInsert` call, so it includes
+no SQL building, statement execution, or IO.
+
+| Output row | Meaning |
+| :--- | :--- |
+| `RowChangeEvent.make_shared` | Construct and destroy one event (record allocation + `shared_ptr`) |
+| `Pipeline.single_row` | One `OnRowChange` round trip, including writer wake-up and execution |
+| `Pipeline.batch.N` | One `OnRowBatchChange` round trip; divide by `N` for the per-record cost |
+
+**`BenchSqlite` / `BenchDuckdb`: a real in-memory database (`":memory:"`), measuring adapter + driver
+write cost.** Each tier truncates the table, writes a fixed number of rows, and takes the median of
+five samples; `batch_size = 1` uses `Db::Insert` (one auto-commit per row) and any larger size uses
+`Db::BatchInsert` (one transaction per batch). Every round reads the rows back, so a silently
+empty table cannot produce a flattering number.
+
+| Output column | Meaning |
+| :--- | :--- |
+| `backend` | `sqlite` or `duckdb` |
+| `batch_size` | Rows per batch; 1 means `Insert`, anything else means `BatchInsert` |
+| `ns_per_record` | Write cost per record (median of five samples) |
+| `ns_slowest` | Per-record cost of the slowest sample |
+| `records_per_sample` | Adaptive rows per sample (roughly 50 ms worth) |
+
+```bash
+# Windows
+./bin/Release/BenchAsyncWriter.exe
+./bin/Release/BenchSqlite.exe
+./bin/Release/BenchDuckdb.exe
+
+# Linux
+./bin/Release/BenchAsyncWriter
+./bin/Release/BenchSqlite
+./bin/Release/BenchDuckdb
+```
+
+> **Note**: MySQL / MariaDB are excluded because they need a local server; their `BatchInsert` is also
+> a per-record `Insert` inside one transaction.
+
+> **Note**: numbers are meaningful only in Release builds; a Debug build prints an `unoptimized`
+> warning before the header and only proves the harness runs. Benchmarks are controlled by
+> `BUILD_BENCHMARKS` (default `ON`) and are built only when `BUILD_TESTS=ON`.
+
+## 10. License & Disclaimer
 
 - **License**: BSD-4-Clause — see the [LICENSE](LICENSE) file
 - **Scope**: This project is for personal learning and research only
 - **Risk**: This is a personal open-source project — thoroughly test and assess risk before use in production
 
-## 10. Additional Notes
+## 11. Additional Notes
 
 - **Include style**: headers use the `#include <DbAdapters/Module/HeaderName.h>` convention
 - **Namespace**: all interfaces live in the `DbAdapters` namespace

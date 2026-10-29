@@ -12,3 +12,9 @@ target_link_libraries(UnitTests PRIVATE doctest::doctest Spark::Core AsyncDbWrit
 if(WIN32)
     copy_dll_file(UnitTests)
 endif()
+
+# 基准随测试一并构建；其数值只在 Release 下有效，Debug 运行会自报警告
+option(BUILD_BENCHMARKS "Build benchmarks (Release build gives meaningful numbers)" ON)
+if(BUILD_BENCHMARKS)
+    add_subdirectory(Benchmarks)
+endif()
